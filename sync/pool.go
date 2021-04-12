@@ -41,12 +41,41 @@ import (
 // free list.
 //
 // A Pool must not be copied after first use.
+
+
+// *******************************************************************************
+// 译者说明
+// 选择第一个补充包在sync包，其一是之前了解Pool实现的时候感触比较多
+// 也借此为契机，慢慢由sync包拓展开，补齐各个巧妙设计/基本概念
+// 同时也希望看到这里的码农能在此过程中享受技术带来的纯粹的乐趣
+
+// 阅读建议
+// 由基础结构体出发，明确各个字段设定的意义跟用途
+// 从提供的基础方法去落地实现的细节以及使用的注意点
+// 如果有时间精力，也可以了解了解这个包的优化条项
+// *******************************************************************************
+
 type Pool struct {
+
+	// 就像Pool结构体的描述一样，"must not be copied after first use"
+	// 那么，怎么保证不被copy呢？
+	// golang在同步包cond中定义了 noCopy的接口
+	// 这里的noCopy设计理念比较巧妙，"OK-but-not-obviously-right"的建议
+	// 强制使用不会对程序造成影响，一来是至今Go还做不到
+	// 不过可以通过vet很简单观测到，这个也是go最常用的处理方式
 	noCopy noCopy
 
+	// 此处也是经过几个版本的优化
+	// 在1.9版本之前，local解决并发问题的方式是加锁
+	// 之后版本之后，改用了lock free的乐观锁+CAS
 	local     unsafe.Pointer // local fixed-size per-P pool, actual type is [P]poolLocal
 	localSize uintptr        // size of the local array
 
+	// victim 概念来自操作系统的实现，也是Go版本1.9之后的优化引入的
+	// victim 实际指的是victim cache
+	// 既然是cache，实际上想解决的问题就比较通俗易懂了，有兴趣可以去详细查阅下:
+	// https://en.wikipedia.org/wiki/Victim_cache
+	// 简单说明就是用来针对pool的对象做缓存操作
 	victim     unsafe.Pointer // local from previous cycle
 	victimSize uintptr        // size of victims array
 
