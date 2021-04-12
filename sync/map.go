@@ -102,11 +102,13 @@ func newEntry(i interface{}) *entry {
 func (m *Map) Load(key interface{}) (value interface{}, ok bool) {
 	read, _ := m.read.Load().(readOnly)
 	e, ok := read.m[key]
+	// 如果read中不存在，且read被标记为不完整（amended==true），则从dirty中读取
 	if !ok && read.amended {
 		m.mu.Lock()
 		// Avoid reporting a spurious miss if m.dirty got promoted while we were
 		// blocked on m.mu. (If further loads of the same key will not miss, it's
 		// not worth copying the dirty map for this key.)
+		// 再次load一遍，防止提升dirty的时候，read被更新了
 		read, _ = m.read.Load().(readOnly)
 		e, ok = read.m[key]
 		if !ok && read.amended {
@@ -114,6 +116,7 @@ func (m *Map) Load(key interface{}) (value interface{}, ok bool) {
 			// Regardless of whether the entry was present, record a miss: this key
 			// will take the slow path until the dirty map is promoted to the read
 			// map.
+			// 对从read中读取不到的一个计数，当计数超过dirty的长度时，提升dirty到read
 			m.missLocked()
 		}
 		m.mu.Unlock()
@@ -134,29 +137,38 @@ func (e *entry) load() (value interface{}, ok bool) {
 
 // Store sets the value for a key.
 func (m *Map) Store(key, value interface{}) {
+	// 加载read
 	read, _ := m.read.Load().(readOnly)
+	// 如果key在read中存在，则尝试更新
 	if e, ok := read.m[key]; ok && e.tryStore(&value) {
 		return
 	}
 
 	m.mu.Lock()
+	// 为什么要重新load一遍？在加锁过程中，其他goroutine有可能会更新read，比如从dirty提升到read
 	read, _ = m.read.Load().(readOnly)
 	if e, ok := read.m[key]; ok {
+		// 判断entry是否被标记为清除，如果是，说明dirty没有此key，则更新dirty
 		if e.unexpungeLocked() {
 			// The entry was previously expunged, which implies that there is a
 			// non-nil dirty map and this entry is not in it.
+			// 为什么此时m.dirty[key]要赋值e？此时e为nil
 			m.dirty[key] = e
 		}
 		e.storeLocked(&value)
 	} else if e, ok := m.dirty[key]; ok {
 		e.storeLocked(&value)
 	} else {
+		// read.amended表示read是否完整。即key在read不存在，但dirty中存在的时候，amended为true
 		if !read.amended {
 			// We're adding the first new key to the dirty map.
 			// Make sure it is allocated and mark the read-only map as incomplete.
+			// 如果entry没有被标记为expunged（清除）的时候，从read中赋值给dirty。这时候，read和dirty数据是一致的
 			m.dirtyLocked()
+			// 将read标记为不完整
 			m.read.Store(readOnly{m: read.m, amended: true})
 		}
+		// 将键值对保存到dirty中
 		m.dirty[key] = newEntry(value)
 	}
 	m.mu.Unlock()
@@ -167,8 +179,10 @@ func (m *Map) Store(key, value interface{}) {
 // If the entry is expunged, tryStore returns false and leaves the entry
 // unchanged.
 func (e *entry) tryStore(i *interface{}) bool {
+	// 需要注意的是，当有大量的goroutine 对变量进行读写操作时，可能导致CAS操作无法成功，这时可以利用for循环多次尝试
 	for {
 		p := atomic.LoadPointer(&e.p)
+		// p == expunged 表示改条目已被置空，无需保存
 		if p == expunged {
 			return false
 		}
@@ -353,6 +367,7 @@ func (m *Map) missLocked() {
 	if m.misses < len(m.dirty) {
 		return
 	}
+	// 当计数超过dirty的长度是，提升dirty到read，此时dirty和read的数据一致
 	m.read.Store(readOnly{m: m.dirty})
 	m.dirty = nil
 	m.misses = 0
@@ -366,6 +381,7 @@ func (m *Map) dirtyLocked() {
 	read, _ := m.read.Load().(readOnly)
 	m.dirty = make(map[interface{}]*entry, len(read.m))
 	for k, e := range read.m {
+		// 如果entry没有被标记为清除的时候，从read中赋值给dirty
 		if !e.tryExpungeLocked() {
 			m.dirty[k] = e
 		}
