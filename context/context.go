@@ -233,7 +233,9 @@ func WithCancel(parent Context) (ctx Context, cancel CancelFunc) {
 	if parent == nil {
 		panic("cannot create context from nil parent")
 	}
+	// 继承父上下文
 	c := newCancelCtx(parent)
+	// 传播上下文取消事件
 	propagateCancel(parent, &c)
 	return &c, func() { c.cancel(true, Canceled) }
 }
@@ -249,11 +251,13 @@ var goroutines int32
 // propagateCancel arranges for child to be canceled when parent is.
 func propagateCancel(parent Context, child canceler) {
 	done := parent.Done()
+	// 判断父上下文是否会包含取消事件，比如父上下文为context.Background()或context.TODO()则永远不会触发取消事件
 	if done == nil {
 		return // parent is never canceled
 	}
 
 	select {
+	// 当父上下文已经触发了取消事件，则取消子上下文
 	case <-done:
 		// parent is already canceled
 		child.cancel(false, parent.Err())
@@ -261,6 +265,7 @@ func propagateCancel(parent Context, child canceler) {
 	default:
 	}
 
+	// 判断父上下文是否包含了可以取消的上下文
 	if p, ok := parentCancelCtx(parent); ok {
 		p.mu.Lock()
 		if p.err != nil {
@@ -270,6 +275,7 @@ func propagateCancel(parent Context, child canceler) {
 			if p.children == nil {
 				p.children = make(map[canceler]struct{})
 			}
+			// 将子上下文保存到父上下文的children字段中，当父上下文触发取消事件是，会遍历children这个map
 			p.children[child] = struct{}{}
 		}
 		p.mu.Unlock()
@@ -404,8 +410,10 @@ func (c *cancelCtx) cancel(removeFromParent bool, err error) {
 	if c.done == nil {
 		c.done = closedchan
 	} else {
+		// c.done被关闭后，<-c.done不再阻塞。返回值为零值、channel是否关闭的标识（true/false）
 		close(c.done)
 	}
+	// 遍历关闭当前上下文的子上下文
 	for child := range c.children {
 		// NOTE: acquiring the child's lock while holding parent's lock.
 		child.cancel(false, err)
@@ -414,6 +422,7 @@ func (c *cancelCtx) cancel(removeFromParent bool, err error) {
 	c.mu.Unlock()
 
 	if removeFromParent {
+		// 从父上下文的children中删除当前子上下文
 		removeChild(c.Context, c)
 	}
 }
@@ -431,15 +440,18 @@ func WithDeadline(parent Context, d time.Time) (Context, CancelFunc) {
 	if parent == nil {
 		panic("cannot create context from nil parent")
 	}
+	// 获取父上下文的截止时间，并判断是否在当前设置的截止时间之前。截止时间只能设置为比父上下文短
 	if cur, ok := parent.Deadline(); ok && cur.Before(d) {
 		// The current deadline is already sooner than the new one.
 		return WithCancel(parent)
 	}
+	// 继承父上下文
 	c := &timerCtx{
 		cancelCtx: newCancelCtx(parent),
 		deadline:  d,
 	}
 	propagateCancel(parent, c)
+	// 当前时间减去实参里的时间，获取当前时间距离截止时间的差值。如果为负数则取消上下文
 	dur := time.Until(d)
 	if dur <= 0 {
 		c.cancel(true, DeadlineExceeded) // deadline has already passed
@@ -448,6 +460,7 @@ func WithDeadline(parent Context, d time.Time) (Context, CancelFunc) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.err == nil {
+		// 以截止时间设置“闹钟”，到达截止时间则触发上下文取消事件
 		c.timer = time.AfterFunc(dur, func() {
 			c.cancel(true, DeadlineExceeded)
 		})
